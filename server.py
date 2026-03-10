@@ -42,7 +42,7 @@ def chat(body: ChatIn):
         "messages": 
             {"role": "system", "content": "You are a concise, helpful assistant."},
             {"role": "user",   "content": text},
-        ],
+    
         "temperature": 0.6,
         "max_tokens": 300,
     }
