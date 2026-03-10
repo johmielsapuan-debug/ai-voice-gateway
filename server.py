@@ -3,8 +3,10 @@ import requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from fastapi.responses import FileResponse          # NEW ⚠️
-from fastapi.staticfiles import StaticFiles         # NEW ⚠️
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+
+# ... (keep your NVIDIA_API_KEY / NIM_* variables and CHAT_URL as they are)
 
 app = FastAPI(title="NVIDIA NIM Voice Gateway")
 app.add_middleware(
@@ -15,7 +17,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/public", StaticFiles(directory="public"), name="public")
+# ✅ Only mount /public if the folder actually exists
+PUBLIC_DIR = os.path.join(os.path.dirname(__file__), "public")
+if os.path.isdir(PUBLIC_DIR):
+    app.mount("/public", StaticFiles(directory=PUBLIC_DIR), name="public")
 
 class ChatIn(BaseModel):
     text: str
@@ -23,10 +28,11 @@ class ChatIn(BaseModel):
 class ChatOut(BaseModel):
     reply: str
 
+# ✅ If public/index.html exists, serve it at '/', else return JSON status
 @app.get("/", include_in_schema=False)
 def root():
-    index_path = os.path.join(os.path.dirname(__file__), "public", "index.html")
-    if os.path.exists(index_path):
+    index_path = os.path.join(PUBLIC_DIR, "index.html")
+    if os.path.isfile(index_path):
         return FileResponse(index_path, media_type="text/html")
     return {"service": "nim-gateway", "status": "ok", "model": NIM_LLM_MODEL}
 
@@ -53,10 +59,8 @@ def chat(body: ChatIn):
     resp = requests.post(CHAT_URL, json=payload, headers=headers, timeout=60)
     resp.raise_for_status()
     data = resp.json()
-
     try:
         reply = data["choices"][0]["message"]["content"]
     except Exception:
         reply = str(data)
-
     return {"reply": reply}
