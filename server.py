@@ -81,3 +81,17 @@ def chat(body: ChatIn):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+import os
+
+PUBLIC_DIR = os.path.join(os.path.dirname(__file__), "public")
+if os.path.isdir(PUBLIC_DIR):
+    app.mount("/public", StaticFiles(directory=PUBLIC_DIR), name="public")
+
+@app.get("/", include_in_schema=False)
+def root():
+    index_path = os.path.join(PUBLIC_DIR, "index.html")
+    if os.path.isfile(index_path):
+        return FileResponse(index_path, media_type="text/html")
+    return {"service": "nim-gateway", "status": "ok", "model": NIM_LLM_MODEL}
