@@ -3,91 +3,232 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>AI Voice — Web Client v2 (NVIDIA)</title>
+  <title>AI Voice</title>
   <style>
-    :root{--bg:#0b1220;--panel:#0f172a;--text:#e5e7eb;--muted:#9ca3af;--brand:#22c55e;--accent:#60a5fa;--danger:#ef4444}
-    html,body{height:100%}
-    body{margin:0;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;background:var(--bg);color:var(--text);display:flex;align-items:center;justify-content:center}
-    .card{width:min(900px,95vw);background:var(--panel);border:1px solid #1f2937;border-radius:14px;padding:22px 20px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
-    h1{margin:0 0 6px 0} p{margin:.2rem 0 .8rem 0;color:var(--muted)}
-    .row{display:flex;gap:10px;flex-wrap:wrap;margin:.5rem 0 1rem}
-    input[type=url],textarea{flex:1;min-width:260px;padding:10px 12px;border-radius:10px;border:1px solid #374151;background:#0b1220;color:#e5e7eb}
-    button{border:0;border-radius:10px;padding:10px 14px;font-weight:600;cursor:pointer}
-    .rec{background:var(--brand);color:#052012}.stop{background:var(--danger);color:#2b0b0b}.send{background:var(--accent);color:#08192c}
-    .log{background:#0b1220;border:1px solid #1f2937;border-radius:10px;padding:10px;height:210px;overflow:auto;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;white-space:pre-wrap}
-    .hint{font-size:13px;color:var(--muted)} .chat{display:flex;gap:10px} .chat textarea{min-height:64px}
+    /* --- 1) Background stays exactly as your current site --- */
+    :root { --bg:#0b1220; --muted:#90a4b8; --glow:#22c55e; --ring:#60a5fa; }
+    html,body { height:100%; margin:0; background:var(--bg); color:#e5e7eb; }
+
+    /* --- 2) Full‑screen stage with just one character in the middle --- */
+    .stage {
+      height:100%; display:flex; align-items:center; justify-content:center;
+      user-select:none; -webkit-user-select:none; -ms-user-select:none;
+      touch-action:manipulation;
+    }
+
+    /* --- 3) Avatar container (responsive “normal” size based on screen) --- */
+    .avatar {
+      width:min(36vh, 46vw); aspect-ratio:1/1; position:relative;
+      filter: drop-shadow(0 20px 60px rgba(0,0,0,.45));
+      transition: transform .25s ease;
+      animation: breathe 4s ease-in-out infinite;
+    }
+    @keyframes breathe {
+      0%,100% { transform: translateY(0) scale(1); }
+      50%     { transform: translateY(-2px) scale(1.01); }
+    }
+
+    /* --- 4) Listening ring & speaking pulse --- */
+    .ring {
+      position:absolute; inset:-10%;
+      border-radius:50%;
+      box-shadow: 0 0 0 0 var(--ring);
+      opacity:0; pointer-events:none;
+    }
+    .listening .ring {
+      animation: ring 1.2s ease-out infinite; opacity:.8;
+    }
+    @keyframes ring {
+      0%   { box-shadow: 0 0 0 0 rgba(96,165,250,.55); }
+      100% { box-shadow: 0 0 0 24px rgba(96,165,250,0); }
+    }
+    .speaking .ring {
+      animation: speakPulse 0.6s ease-in-out infinite; opacity:.9;
+    }
+    @keyframes speakPulse {
+      0%,100% { box-shadow: 0 0 0 4px rgba(34,197,94,.45); }
+      50%     { box-shadow: 0 0 0 10px rgba(34,197,94,.15); }
+    }
+
+    /* --- 5) SVG avatar pieces --- */
+    svg { width:100%; height:100%; display:block; }
+    .head { fill:#142034; stroke:#1e2b44; stroke-width:2; }
+    .face { fill:#0f1a2b; }
+    .eye  { fill:#e5e7eb; }
+    .pupil{ fill:#0b1220; }
+    .brow { stroke:#2a3a59; stroke-width:3; stroke-linecap:round; }
+    .mouth { fill:#ef4444; transform-origin:50% 60%; }
+    /* speaking mouth */
+    .speaking .mouth { animation: talk 220ms ease-in-out infinite; }
+    @keyframes talk {
+      0%,100% { transform: scaleY(.5); }
+      50%     { transform: scaleY(1.2); }
+    }
+    /* subtle blink */
+    .lid { fill:#0b1220; transform-origin:50% 50%; }
+    .blink .lid { animation: blink 6s infinite; }
+    @keyframes blink {
+      0%,97%,100% { transform: scaleY(0); }
+      98%         { transform: scaleY(1); }
+    }
+
+    /* --- 6) Minimal hint (auto-hides). Not a button. --- */
+    .hint {
+      position:fixed; left:50%; bottom:22px; transform:translateX(-50%);
+      background:rgba(15,23,42,.7); color:var(--muted);
+      border:1px solid rgba(148,163,184,.25);
+      padding:10px 14px; border-radius:10px; font:14px/1.3 system-ui,Arial;
+      opacity:0; transition:opacity .3s;
+    }
+    .hint.show { opacity:1; }
+    .sr-only { position:absolute; clip:rect(0 0 0 0); clip-path:inset(50%);
+               width:1px; height:1px; overflow:hidden; white-space:nowrap; border:0; }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>AI Voice — Web Client v2 (NVIDIA)</h1>
-    <p>Press <b>Record</b>, speak. The browser transcribes locally. We send text to your NVIDIA gateway <code>/chat</code> and speak the reply.</p>
-
-    <div class="row">
-      <input id="server" type="url" placeholder="(leave blank to use this site) or paste https://YOUR-SERVICE.onrender.com" />
-      <button class="rec" id="recBtn">Record</button>
-      <button class="stop" id="stopBtn" disabled>Stop</button>
-      <button class="send" id="sendBtn" disabled>Send</button>
+  <main class="stage">
+    <!-- Animated person (simple stylized avatar) -->
+    <div id="avatar" class="avatar blink" aria-label="Animated assistant">
+      <div class="ring"></div>
+      <svg viewBox="0 0 200 200" role="img" aria-hidden="true">
+        <defs>
+          <radialGradient id="shine" cx="30%" cy="25%" r="70%">
+            <stop offset="0%" stop-color="#1c2945"/>
+            <stop offset="100%" stop-color="#0f1a2b"/>
+          </radialGradient>
+        </defs>
+        <!-- Head -->
+        <circle class="head" cx="100" cy="100" r="82"/>
+        <circle class="face" cx="100" cy="100" r="74" fill="url(#shine)"/>
+        <!-- Eyes -->
+        <ellipse class="eye" cx="70" cy="90" rx="14" ry="10"/>
+        <circle  class="pupil" cx="70" cy="90" r="5"/>
+        <ellipse class="eye" cx="130" cy="90" rx="14" ry="10"/>
+        <circle  class="pupil" cx="130" cy="90" r="5"/>
+        <rect class="lid" x="56" y="85" width="28" height="10" rx="5" />
+        <rect class="lid" x="116" y="85" width="28" height="10" rx="5" />
+        <!-- Brows -->
+        <path class="brow" d="M55,72 Q70,62 85,72"/>
+        <path class="brow" d="M115,72 Q130,62 145,72"/>
+        <!-- Mouth -->
+        <ellipse class="mouth" cx="100" cy="130" rx="18" ry="6"/>
+      </svg>
     </div>
+    <p class="sr-only" aria-live="polite" id="live"></p>
+  </main>
 
-    <div class="chat">
-      <textarea id="inputText" placeholder="Or type your question here..."></textarea>
-    </div>
-
-    <div class="hint">Note: Voice recognition & speech synthesis use your browser (free). Replies come from NVIDIA NIM via your gateway.</div>
-
-    <div class="log" id="log"></div>
-  </div>
+  <!-- Tiny (non‑interactive) hint for first‑time mic permission -->
+  <div id="hint" class="hint">If nothing happens, tap anywhere once to allow microphone & audio.</div>
 
 <script>
 (() => {
-  const logEl = document.getElementById('log');
-  const recBtn = document.getElementById('recBtn');
-  const stopBtn = document.getElementById('stopBtn');
-  const sendBtn = document.getElementById('sendBtn');
-  const serverInput = document.getElementById('server');
-  const inputText = document.getElementById('inputText');
+  /* ========= Config ========= */
+  const CHAT_URL = (location.origin.replace(/\/$/,'') + '/chat');
+  const WAKE_WORDS = ['hey'];          // extend if you want
+  const WAKE_REPLY = 'Hi Buddy, How can I help?';
 
-  let recog = null, transcript = '';
+  /* ========= DOM ========= */
+  const avatar = document.getElementById('avatar');
+  const hint   = document.getElementById('hint');
+  const live   = document.getElementById('live');
 
-  function log(m){ const ts=new Date().toLocaleTimeString(); logEl.textContent+=`[${ts}] ${m}\n`; logEl.scrollTop=logEl.scrollHeight; }
-  function supportsWebSpeech(){ return ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window); }
-  function speak(text){ if(!('speechSynthesis' in window)) return; const u=new SpeechSynthesisUtterance(text); speechSynthesis.cancel(); speechSynthesis.speak(u); }
+  /* ========= Speech ========= */
+  const hasTTS = 'speechSynthesis' in window;
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let recog = null;
+  let activated = false;
+  let speaking = false;
 
-  function startRec(){
-    if(!supportsWebSpeech()){ log('❌ Browser does not support SpeechRecognition. Type and press Send.'); return; }
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    recog = new SR(); recog.lang='en-US'; recog.interimResults=true; transcript='';
-    recog.onstart = () => log('🎙️ Listening...');
-    recog.onresult = (ev) => {
-      let final=''; for (const r of ev.results){ if(r.isFinal){ final += r[0].transcript; } }
-      if(final){ transcript += (transcript?' ':'') + final.trim(); inputText.value = transcript; }
-    };
-    recog.onerror = (e) => log('❌ Speech error: ' + e.error);
-    recog.onend = () => { log('⏹️ Mic stopped'); recBtn.disabled=false; stopBtn.disabled=true; sendBtn.disabled=!inputText.value.trim(); };
-    recBtn.disabled=true; stopBtn.disabled=false; sendBtn.disabled=true; recog.start();
+  function showHint(text) {
+    if (text) hint.textContent = text;
+    hint.classList.add('show');
+    setTimeout(()=>hint.classList.remove('show'), 4000);
   }
-  function stopRec(){ if(recog){ try{recog.stop();}catch{} recog=null; } }
 
-  async function send(){
-    const base = (serverInput.value || '').trim();
-    const origin = base ? base.replace(/\/$/,'') : location.origin;
-    const text = (inputText.value || '').trim();
-    if(!text){ log('❌ Nothing to send.'); return; }
-    try{
-      log('→ Sending to ' + origin + '/chat ...');
-      const res = await fetch(origin + '/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text }) });
-      const data = await res.json();
-      const reply = (data && data.reply) ? data.reply : '[empty reply]';
-      log('← Reply: ' + reply);
+  function setListening(on)  { avatar.classList.toggle('listening', !!on); }
+  function setSpeaking(on)   { avatar.classList.toggle('speaking',  !!on); speaking = !!on; }
+
+  function speak(text) {
+    if (!hasTTS || !text) return;
+    try {
+      setSpeaking(true);
+      const u = new SpeechSynthesisUtterance(text);
+      u.onend = () => setSpeaking(false);
+      speechSynthesis.cancel();
+      speechSynthesis.speak(u);
+      live.textContent = text; // accessibility
+    } catch(e){ setSpeaking(false); }
+  }
+
+  async function sendToGateway(text) {
+    try {
+      const res = await fetch(CHAT_URL, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ text })
+      });
+      const data = await res.json().catch(()=>({reply:''}));
+      const reply = (data && data.reply) ? data.reply : "I couldn't get a response.";
       speak(reply);
-    }catch(err){ log('❌ Request failed: ' + err); }
+    } catch (err) {
+      speak("Network error.");
+      console.error(err);
+    }
   }
 
-  recBtn.addEventListener('click', startRec);
-  stopBtn.addEventListener('click', stopRec);
-  sendBtn.addEventListener('click', send);
-  inputText.addEventListener('input', () => { sendBtn.disabled = !inputText.value.trim(); });
+  function onFinalTranscript(phrase) {
+    const t = (phrase || '').trim().toLowerCase();
+    if (!t) return;
+
+    // 4) Wake-word path: say “Hey” → reply with “Hi Buddy, How can I help?”
+    if (!activated && WAKE_WORDS.some(w => t.split(/\s+/).includes(w))) {
+      activated = true;
+      speak(WAKE_REPLY);
+      return;
+    }
+
+    // After wake, every utterance goes to your NVIDIA gateway
+    if (activated) sendToGateway(phrase);
+  }
+
+  function handleResults(ev) {
+    let final = '';
+    for (const r of ev.results) {
+      if (r.isFinal) final += (r[0].transcript + ' ');
+    }
+    if (final) onFinalTranscript(final);
+  }
+
+  function startRecognition() {
+    if (!SR) { showHint('SpeechRecognition not supported on this browser.'); return; }
+    try {
+      recog = new SR();
+      recog.lang = 'en-US';
+      recog.continuous = true;
+      recog.interimResults = true;
+      recog.onstart = () => setListening(true);
+      recog.onend   = () => { setListening(false); setTimeout(() => tryStart(), 300); };
+      recog.onerror = (e) => { setListening(false); console.warn(e.error); if (e.error === 'not-allowed') showHint('Please allow microphone access.'); };
+      recog.onresult= handleResults;
+      recog.start();
+    } catch (e) {
+      // Some browsers require a user gesture. Show a one-time, non-button hint
+      showHint('Tap anywhere once to activate the microphone.');
+    }
+  }
+
+  function tryStart() {
+    if (speaking) return; // don't restart while TTS is speaking
+    startRecognition();
+  }
+
+  // 5) No buttons: attempt to start automatically.
+  document.addEventListener('DOMContentLoaded', () => {
+    tryStart();
+    // If mic/auto-play are blocked, one tap anywhere will retry.
+    document.addEventListener('click', () => { tryStart(); }, { once:true });
+    // Also allow tapping the avatar to retry silently (still not a "button")
+    avatar.addEventListener('pointerdown', () => { tryStart(); }, { passive:true });
+  });
 })();
 </script>
 </body>
