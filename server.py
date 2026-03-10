@@ -39,7 +39,9 @@ def chat(body: ChatIn):
     if not text:
         return {"reply": ""}
 
-    # IMPORTANT: payload is a dict { ... }, messages is a list [ ... ]
+    # NOTE:
+    # - payload is a dict {...}
+    # - messages is a list [...]
     payload = {
         "model": NIM_LLM_MODEL,
         "messages": [
@@ -71,3 +73,4 @@ def chat(body: ChatIn):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+``
