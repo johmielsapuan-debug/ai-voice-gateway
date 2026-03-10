@@ -93,11 +93,12 @@
   /* ===== Config ===== */
   const CHAT_URL    = location.origin.replace(/\/$/,'') + '/chat';
   const LANG        = 'en-US';
-  const WAKE_WORD   = 'hello';      // require “Hello” for every question
+  const WAKE_WORD   = 'hello';              // require “Hello” for EVERY question
   const BEEP_FREQ   = 880, BEEP_MS = 140;
-  const PAUSE_MS    = 1200;         // quick pause → finalize
-  const MAX_WAIT_MS = 5000;         // safety cap
+  const PAUSE_MS    = 1200;                 // quick pause → finalize
+  const MAX_WAIT_MS = 5000;                 // safety cap
   const TTS_VOL     = 1.0, TTS_RATE = 0.98, TTS_PITCH = 1.02;
+  const WAKE_COOLDOWN_MS = 1500;            // de-bounce: no re-beep inside this window
 
   /* ===== DOM ===== */
   const avatar = document.getElementById('avatar');
@@ -131,7 +132,7 @@
   const hasTTS = 'speechSynthesis' in window;
 
   let recog=null, speaking=false, listening=false;
-  let activated=false, buffer='', idleTimer=null, hardTimer=null;
+  let activated=false, buffer='', idleTimer=null, hardTimer=null, lastWakeTs=0;
 
   function setListening(on){ avatar.classList.toggle('listening', !!on); listening = !!on; }
   function setAsking(on){ avatar.classList.toggle('asking', !!on); }
@@ -147,7 +148,7 @@
       recog.onend    = () => { setListening(false); if (!speaking) setTimeout(tryStart, 900); };
       recog.onerror  = () => { setListening(false); if (!speaking) setTimeout(tryStart, 1400); };
       recog.onresult = (ev) => {
-        if (activated) resetPauseTimers();
+        if (activated) resetPauseTimers();                 // activity keeps timers alive
         let final = '';
         for (const r of ev.results){ if (r.isFinal) final += (r[0].transcript + ' '); }
         if (final) onFinal(final);
@@ -157,7 +158,7 @@
   }
   function tryStart(){ if (!speaking) startRecognition(); }
 
-  /* ===== TTS: pick a real voice + retry if first attempt fails ===== */
+  /* ===== TTS: pick a good local voice + retry if needed ===== */
   let preferredVoice = null;
   function pickVoice(){
     const list = window.speechSynthesis.getVoices();
@@ -180,13 +181,13 @@
 
     const speakOnce = (voiceOverride=null) => new Promise(resolve => {
       try{
-        // Resume engine (Safari/Chrome sometimes suspend)
+        // Kick/resume engine (fixes “no audio” cases)
         try{ speechSynthesis.resume(); }catch{}
-
         stopRecognition(); setSpeaking(true);
+
         const u = new SpeechSynthesisUtterance(text);
-        u.lang = LANG; u.volume = TTS_VOL; u.rate = TTS_RATE; u.pitch = TTS_PITCH;
-        u.voice = voiceOverride || preferredVoice || null;
+        u.lang   = LANG; u.volume = TTS_VOL; u.rate = TTS_RATE; u.pitch = TTS_PITCH;
+        u.voice  = voiceOverride || preferredVoice || null;
 
         let started = false;
         const guard = setTimeout(()=>{ if(!started){ try{ speechSynthesis.cancel(); }catch{} resolve(false); }}, 700);
@@ -202,7 +203,6 @@
     });
 
     (async () => {
-      // Try preferred voice, then any 'en' voice, then default
       const voices = speechSynthesis.getVoices();
       const fallbacks = [
         preferredVoice,
@@ -212,12 +212,11 @@
 
       for (const v of fallbacks){
         const ok = await speakOnce(v);
-        if (ok) { tryStart(); activated=false; setAsking(false); return; }
+        if (ok) { activated=false; setAsking(false); tryStart(); return; }
       }
-      // Last resort: try once more with no voice specified
-      const ok = await speakOnce(null);
-      tryStart(); activated=false; setAsking(false);
-      if (!ok) { console.warn('TTS failed to start; voice/permission issue.'); }
+      const ok = await speakOnce(null); // last attempt
+      activated=false; setAsking(false); tryStart();
+      if (!ok) { console.warn('TTS failed to start; check device audio & site permissions.'); }
     })();
   }
 
@@ -231,7 +230,8 @@
       clearTimeout(to);
       const data  = await res.json().catch(()=>({reply:''}));
       const reply = (data && data.reply) ? data.reply : '';
-      speak(reply || "I couldn't get an answer.");
+      if (reply) speak(reply);
+      else       { activated=false; setAsking(false); tryStart(); }
     }catch(e){ speak('Sorry, I lost the connection.'); }
   }
 
@@ -243,40 +243,47 @@
     const q = buffer.trim();
     disarmAsking();
     if (q) askGateway(q);
+    // If empty → do nothing (no speech), exactly as you requested
   }
 
   function resetPauseTimers(){
     clearTimeout(idleTimer); clearTimeout(hardTimer);
-    idleTimer = setTimeout(finalize, PAUSE_MS);
-    hardTimer = setTimeout(finalize, MAX_WAIT_MS);
+    idleTimer = setTimeout(finalize, 1200);  // fast end-of-speech
+    hardTimer = setTimeout(finalize, 5000);  // absolute cap
+  }
+
+  function normalized(str){
+    return (str||'').toLowerCase().replace(/[^a-z\s]/g,' ').replace(/\s+/g,' ').trim();
+  }
+  function isHello(str){
+    // strict word-boundary match to avoid false positives
+    return /\bhello\b/.test(normalized(str));
   }
 
   function onFinal(finalText){
-    const t = finalText.trim();
-    if (!t) return;
+    const text = finalText.trim();
+    if (!text) return;
 
+    // If armed, collect question; timers decide when to finalize
     if (activated){
-      buffer += (buffer ? ' ' : '') + t;
+      buffer += (buffer ? ' ' : '') + text;
       resetPauseTimers();
       return;
     }
 
-    // Wake word: ALWAYS beep and arm; also unlock audio devices
-    const lower = t.toLowerCase();
-    const saidHello = lower === WAKE_WORD
-      || lower.startsWith(WAKE_WORD+' ')
-      || lower.endsWith(' '+WAKE_WORD)
-      || lower.includes(' '+WAKE_WORD+' ');
-    if (saidHello){
-      ensureAudio().then(()=>beep());   // beep + resume audio context
-      armAsking();                      // listen for the question now
-      resetPauseTimers();               // in case of quick pause
+    // Wake detection with de-bounce (no repeated beeps)
+    const now = Date.now();
+    if (isHello(text) && (now - lastWakeTs) >= WAKE_COOLDOWN_MS){
+      lastWakeTs = now;
+      ensureAudio().then(()=>beep());  // one beep only
+      armAsking();
+      resetPauseTimers();              // in case of quick pause right after “Hello”
     }
   }
 
   document.addEventListener('DOMContentLoaded', () => {
     ensureVoicesReady(() => { preferredVoice = pickVoice(); });
-    tryStart(); // idle listening; each Q requires “Hello”
+    tryStart(); // idle listening; every question requires “Hello”
   });
 })();
 </script>
