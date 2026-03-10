@@ -1,8 +1,10 @@
 import os
+import requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# Read environment variables
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY") or os.getenv("NIM_API_KEY") or ""
 NIM_BASE_URL   = os.getenv("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 NIM_LLM_MODEL  = os.getenv("NIM_LLM_MODEL", "meta/llama-3.1-8b-instruct")
@@ -37,23 +39,27 @@ def chat(body: ChatIn):
     if not text:
         return {"reply": ""}
 
-    payload = 
+    # IMPORTANT: payload is a dict { ... }, messages is a list [ ... ]
+    payload = {
         "model": NIM_LLM_MODEL,
-        "messages": 
+        "messages": [
             {"role": "system", "content": "You are a concise, helpful assistant."},
-            {"role": "user",   "content": text},
-    
+            {"role": "user",   "content": text}
+        ],
         "temperature": 0.6,
-        "max_tokens": 300,
+        "max_tokens": 300
     }
+
     headers = {
         "Authorization": f"Bearer {NVIDIA_API_KEY}",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
     }
 
     resp = requests.post(CHAT_URL, json=payload, headers=headers, timeout=60)
     resp.raise_for_status()
     data = resp.json()
+
+    # OpenAI-compatible shape: choices[0].message.content
     reply = ""
     try:
         reply = data["choices"][0]["message"]["content"]
