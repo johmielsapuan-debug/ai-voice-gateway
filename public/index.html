@@ -1,18 +1,151 @@
+
 <!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>AI Voice Gateway</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <style>
-      body{font:16px/1.5 system-ui, Arial, sans-serif; margin:2rem}
-      code{background:#f5f5f5; padding:2px 4px; border-radius:4px}
-    </style>
-  </head>
-  <body>
-    <h1>AI Voice Gateway</h1>
-    <p>This service proxies WebRTC SDP offers to the AI Realtime API and returns SDP answers.</p>
-    <p>POST an SDP offer to <code>/session</code> with <code>Content-Type: application/sdp</code>.</p>
-    <p>Requires environment variable: <code>OPENAI_API_KEY</code>.</p>
-  </body>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Voice Gateway — Web Client</title>
+  <style>
+    :root{--bg:#0f172a;--panel:#111827;--text:#e5e7eb;--muted:#9ca3af;--brand:#22c55e;--danger:#ef4444}
+    html,body{height:100%}
+    body{margin:0;font:16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";background:var(--bg);color:var(--text);display:flex;align-items:center;justify-content:center}
+    .card{width:min(880px,94vw);background:var(--panel);border:1px solid #1f2937;border-radius:14px;padding:22px 20px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+    h1{margin:0 0 8px 0;font-weight:700}
+    p{margin:.2rem 0 .8rem 0;color:var(--muted)}
+    .row{display:flex;gap:10px;flex-wrap:wrap;margin:.5rem 0 1rem}
+    input[type=url]{flex:1;min-width:260px;padding:10px 12px;border-radius:10px;border:1px solid #374151;background:#0b1220;color:var(--text)}
+    button{border:0;border-radius:10px;padding:10px 14px;font-weight:600;cursor:pointer}
+    .start{background:var(--brand);color:#04210f}
+    .stop{background:var(--danger);color:#2b0b0b}
+    .muted{color:var(--muted)}
+    .log{background:#0b1220;border:1px solid #1f2937;border-radius:10px;padding:10px;height:180px;overflow:auto;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;font-size:13px;white-space:pre-wrap}
+    .hint{font-size:13px;color:var(--muted)}
+    audio{width:100%;margin-top:.6rem}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>AI Voice — Web Client</h1>
+    <p>Start a realtime voice session with your deployed gateway using the device microphone.</p>
+
+    <div class="row">
+      <input id="gateway" type="url" placeholder="https://your-service.onrender.com" />
+      <button class="start" id="startBtn">Start</button>
+      <button class="stop" id="stopBtn" disabled>Stop</button>
+    </div>
+
+    <div class="hint">If this page is served by the same domain as the gateway, you can leave the field empty (it will use <code>/session</code>).</div>
+
+    <audio id="remote" autoplay playsinline></audio>
+
+    <div class="log" id="log"></div>
+  </div>
+
+<script>
+(() => {
+  const logEl = document.getElementById('log');
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const remoteAudio = document.getElementById('remote');
+  const gatewayInput = document.getElementById('gateway');
+
+  let pc = null;
+  let micStream = null;
+
+  function log(msg){
+    const ts = new Date().toLocaleTimeString();
+    logEl.textContent += `[${ts}] ${msg}
+`;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function getSessionUrl(){
+    const val = (gatewayInput.value || '').trim();
+    if (!val) return '/session';
+    try {
+      const u = new URL(val);
+      return `${u.origin}/session`;
+    } catch { return '/session'; }
+  }
+
+  async function start(){
+    try{
+      if (pc) await stop();
+      log('Requesting microphone…');
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      log('Microphone granted');
+
+      pc = new RTCPeerConnection({
+        iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }]
+      });
+
+      // Play remote audio
+      pc.ontrack = (ev) => {
+        log('Remote audio track received');
+        remoteAudio.srcObject = ev.streams[0];
+        const p = remoteAudio.play();
+        if (p) p.catch(() => log('Note: Tap screen to allow audio playback.'));
+      };
+
+      // Add local mic track
+      for (const track of micStream.getTracks()) {
+        pc.addTrack(track, micStream);
+      }
+
+      log('Creating offer…');
+      const offer = await pc.createOffer({ offerToReceiveAudio: true, voiceActivityDetection: true });
+      await pc.setLocalDescription(offer);
+
+      const sessionUrl = getSessionUrl();
+      log(`POSTing SDP offer to: ${sessionUrl}`);
+
+      const res = await fetch(sessionUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/sdp' },
+        body: offer.sdp
+      });
+
+      if (!res.ok){
+        const t = await res.text();
+        throw new Error(`Gateway responded ${res.status}: ${t.slice(0,200)}`);
+      }
+
+      const answerSdp = await res.text();
+      log('Answer received; setting remote description…');
+      await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      log('✅ Session established. Speak into the mic.');
+    } catch (err){
+      log('❌ ' + (err && err.message ? err.message : err));
+      if (pc) { try { pc.close(); } catch {} pc = null; }
+      if (micStream) { micStream.getTracks().forEach(t=>t.stop()); micStream=null; }
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+    }
+  }
+
+  async function stop(){
+    try{
+      if (pc){ pc.getSenders().forEach(s=>{try{s.track && s.track.stop();}catch{}}); pc.close(); }
+      if (micStream){ micStream.getTracks().forEach(t=>t.stop()); }
+    } finally {
+      pc = null; micStream = null;
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      log('⏹️ Session stopped');
+    }
+  }
+
+  startBtn.addEventListener('click', start);
+  stopBtn.addEventListener('click', stop);
+
+  // Hint if not https
+  if (location.protocol !== 'https:'){
+    log('Warning: Use HTTPS so microphone works on mobile browsers.');
+  }
+})();
+</script>
+</body>
 </html>
