@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AI Voice</title>
   <style>
-    /* Keep your existing background color */
-    :root { --bg:#0b1220; --ring:#60a5fa; --speak:#22c55e; }
+    /* Keep your existing background color (#0b1220) */
+    :root { --bg:#0b1220; --ring:#60a5fa; --speak:#22c55e; --muted:#90a4b8; }
     html,body { height:100%; margin:0; background:var(--bg); color:#e5e7eb; }
 
     /* Fullscreen stage with a single avatar */
@@ -22,15 +22,27 @@
     }
     @keyframes breathe { 0%,100%{transform:translateY(0) scale(1);} 50%{transform:translateY(-2px) scale(1.01);} }
 
-    /* Listening/speaking ring */
-    .ring {
-      position:absolute; inset:-10%; border-radius:50%;
-      box-shadow:0 0 0 0 var(--ring); opacity:0; pointer-events:none;
+    /* Listening / asking / speaking ring */
+    .ring { position:absolute; inset:-10%; border-radius:50%; opacity:0; pointer-events:none; }
+    /* idle listening (recognizer on) */
+    .listening .ring { opacity:.65; animation:ring 1.4s ease-out infinite; }
+    /* actively asking (after wake word until you fall silent) */
+    .asking .ring { opacity:.9; animation:ringActive 0.9s ease-out infinite; }
+    /* speaking (answer) */
+    .speaking .ring { opacity:.95; animation:speakPulse .6s ease-in-out infinite; }
+
+    @keyframes ring {
+      0%{ box-shadow:0 0 0 0 rgba(96,165,250,.40); }
+      100%{ box-shadow:0 0 0 26px rgba(96,165,250,0); }
     }
-    .listening .ring { animation:ring 1.2s ease-out infinite; opacity:.8; }
-    @keyframes ring { 0%{box-shadow:0 0 0 0 rgba(96,165,250,.55);} 100%{box-shadow:0 0 0 26px rgba(96,165,250,0);} }
-    .speaking .ring { animation:speakPulse .6s ease-in-out infinite; opacity:.95; }
-    @keyframes speakPulse { 0%,100%{box-shadow:0 0 0 4px rgba(34,197,94,.45);} 50%{box-shadow:0 0 0 10px rgba(34,197,94,.15);} }
+    @keyframes ringActive {
+      0%{ box-shadow:0 0 0 6px rgba(96,165,250,.65); }
+      100%{ box-shadow:0 0 0 14px rgba(96,165,250,0.10); }
+    }
+    @keyframes speakPulse {
+      0%,100%{ box-shadow:0 0 0 4px rgba(34,197,94,.45); }
+      50%    { box-shadow:0 0 0 10px rgba(34,197,94,.15); }
+    }
 
     /* Cartoon “smart” avatar (glasses + tie) */
     svg { width:100%; height:100%; display:block; }
@@ -46,10 +58,21 @@
     .brow  { stroke:#2a3a59; stroke-width:3; stroke-linecap:round; }
     .mouth { fill:#ef4444; transform-origin:50% 60%; }
     .speaking .mouth { animation:talk .22s ease-in-out infinite; }
-    @keyframes talk { 0%,100%{transform:scaleY(.5);} 50%{transform:scaleY(1.1);} }
+    @keyframes talk { 0%,100%{transform:scaleY(.5);} 50%{transform:scaleY(1.12);} }
     .shirt { fill:#1b2a46; }
     .collar{ fill:#1d2f53; }
     .tie   { fill:#3b82f6; }
+
+    /* One-time hint overlay (no buttons) for mic/audio permission */
+    .hint {
+      position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+      background:rgba(2,6,23,.55); color:var(--muted);
+      font:16px/1.5 system-ui, Arial; text-align:center; padding:24px;
+      opacity:0; pointer-events:none; transition:opacity .25s ease;
+    }
+    .hint.show { opacity:1; pointer-events:auto; }
+    .hint span { background:rgba(15,23,42,.85); border:1px solid rgba(148,163,184,.25);
+                 padding:14px 18px; border-radius:12px; max-width:640px; }
 
     /* Accessibility-only region (no visible text) */
     .sr-only { position:absolute; clip:rect(0 0 0 0); clip-path:inset(50%);
@@ -95,48 +118,52 @@
     <p id="live" class="sr-only"></p>
   </main>
 
+  <!-- One-time overlay hint (tap anywhere to enable mic/audio) -->
+  <div id="hint" class="hint"><span>Tap anywhere once to enable microphone & audio. Then say <b>Hello</b>, wait for the beep, ask your question, and I’ll speak the answer.</span></div>
+
 <script>
 (() => {
-  /* ========= Config ========= */
+  /* ===== Config ===== */
   const CHAT_URL   = location.origin.replace(/\/$/,'') + '/chat';
-  const WAKE_WORD  = 'hello';        // 1) Say “Hello” to arm recording
-  const BEEP_FREQ  = 880;            // Start cue beep
-  const BEEP_MS    = 140;
   const LANG       = 'en-US';
-  const SILENCE_MS = 5000;           // 2) 5s silence → finalize and answer
+  const WAKE_WORD  = 'hello';          // 1) wake word
+  const BEEP_FREQ  = 880, BEEP_MS = 140;
+  const SILENCE_MS = 5000;             // 2) 5s silence → finalize question
 
-  /* ========= DOM ========= */
+  /* ===== DOM ===== */
   const avatar = document.getElementById('avatar');
+  const ring   = avatar.querySelector('.ring');
+  const hint   = document.getElementById('hint');
   const live   = document.getElementById('live');
 
-  /* ========= Audio (beep) ========= */
-  let audioCtx = null;
-  async function beep(freq=BEEP_FREQ, ms=BEEP_MS, vol=0.25){
-    try{
-      audioCtx = audioCtx || new (window.AudioContext||window.webkitAudioContext)();
-      if (audioCtx.state === 'suspended') await audioCtx.resume();
-      const osc = audioCtx.createOscillator();
-      const gain= audioCtx.createGain();
-      osc.type='sine'; osc.frequency.value=freq; gain.gain.value=vol;
-      osc.connect(gain); gain.connect(audioCtx.destination);
-      osc.start(); setTimeout(()=>{ try{osc.stop();}catch{} }, ms);
-    }catch(e){ /* ignore autoplay errors */ }
+  /* ===== Audio (beep + autoplay handling) ===== */
+  let audioCtx = null, userActivated = false;
+  async function ensureAudio(){
+    if (!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') { try{ await audioCtx.resume(); }catch{} }
   }
+  async function beep(freq=BEEP_FREQ, ms=BEEP_MS, vol=0.28){
+    try{
+      await ensureAudio();
+      const osc = audioCtx.createOscillator(), g = audioCtx.createGain();
+      osc.type='sine'; osc.frequency.value=freq; g.gain.value = vol;
+      osc.connect(g); g.connect(audioCtx.destination);
+      osc.start(); setTimeout(()=>{ try{osc.stop();}catch{} }, ms);
+    }catch(e){ /* ignore if still blocked */ }
+  }
+  function showHint(){ hint.classList.add('show'); }
+  function hideHint(){ hint.classList.remove('show'); }
 
-  /* ========= Speech ========= */
+  /* ===== Speech ===== */
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   const hasTTS = 'speechSynthesis' in window;
 
-  let recog = null;
-  let listening = false;
-  let speaking  = false;
-
-  let activated = false;      // were we armed by the “Hello” wake word?
-  let buffer    = '';         // collected question after beep
-  let idleTimer = null;       // silence timer after last speech
+  let recog=null, speaking=false, listening=false;
+  let activated=false, buffer='', idleTimer=null, lastHeard=0;
 
   function setListening(on){ avatar.classList.toggle('listening', !!on); listening = !!on; }
-  function setSpeaking(on){ avatar.classList.toggle('speaking',  !!on); speaking  = !!on; }
+  function setAsking(on){ avatar.classList.toggle('asking', !!on); }
+  function setSpeaking(on){ avatar.classList.toggle('speaking', !!on); speaking = !!on; }
 
   function speak(text){
     if (!hasTTS || !text) return;
@@ -144,9 +171,11 @@
       setSpeaking(true);
       const u = new SpeechSynthesisUtterance(text);
       u.lang = LANG;
-      u.onend = () => { setSpeaking(false); tryStart(); }; // re-open mic after talking
+      u.onend = () => { setSpeaking(false); if (!listening) tryStart(); };
+      // Cancel queue to avoid overlap, then speak
       speechSynthesis.cancel(); speechSynthesis.speak(u);
-      live.textContent = text; // accessibility only; no visible text
+      // No visible text (audio only); update a11y region
+      live.textContent = text;
     }catch(e){ setSpeaking(false); }
   }
 
@@ -156,41 +185,58 @@
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({ text })
       });
-      const data  = await res.json().catch(()=>({reply:''}));
+      const data = await res.json().catch(()=>({reply:''}));
       const reply = (data && data.reply) ? data.reply : '';
       if (reply) speak(reply);
     }catch(e){ speak('Sorry, I lost the connection.'); }
   }
 
-  function finalizeIfNeeded(){
-    if (!activated) return;
-    if (buffer.trim().length === 0) return; // nothing said after beep
-    // Send the question and reset to need “Hello” again for the next one
-    askGateway(buffer.trim());
+  function armAsking(){
+    activated = true;
     buffer = '';
-    activated = false;
+    setAsking(true);
   }
-
+  function disarmAsking(){
+    activated = false;
+    setAsking(false);
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  }
   function resetIdleTimer(){
     clearTimeout(idleTimer);
-    idleTimer = setTimeout(finalizeIfNeeded, SILENCE_MS);
+    idleTimer = setTimeout(()=>finalizeIfNeeded(), SILENCE_MS);
+  }
+
+  function finalizeIfNeeded(){
+    if (!activated) return;
+    const q = buffer.trim();
+    disarmAsking();
+    if (q) askGateway(q);
+  }
+
+  function onAnySpeechEvent(){
+    lastHeard = Date.now();
+    if (activated) resetIdleTimer();
   }
 
   function onFinalTranscript(phraseRaw){
     const phrase = (phraseRaw || '').trim();
     const lower  = phrase.toLowerCase();
 
-    // 1) Wake on “hello” → beep → arm capture (no text displayed)
-    const containsHello = lower === WAKE_WORD || lower.startsWith(WAKE_WORD+' ')
-                       || lower.endsWith(' '+WAKE_WORD) || lower.includes(' '+WAKE_WORD+' ');
-    if (!activated && containsHello){
-      activated = true;
-      buffer = '';
-      beep();                // start cue (ask now)
-      return;                // wait for the actual question
+    // Wake word detection
+    const saidHello = lower === WAKE_WORD
+      || lower.startsWith(WAKE_WORD+' ')
+      || lower.endsWith(' '+WAKE_WORD)
+      || lower.includes(' '+WAKE_WORD+' ');
+
+    if (!activated && saidHello){
+      // Beep immediately (start prompt) and arm asking
+      beep();
+      armAsking();
+      return; // wait for the actual question words
     }
 
-    // 2) After wake, collect the user’s speech; 5s silence → finalize & answer
+    // If armed, accumulate the question and wait for 5s silence
     if (activated){
       buffer += (buffer ? ' ' : '') + phrase;
       resetIdleTimer();
@@ -198,10 +244,9 @@
   }
 
   function handleResults(ev){
+    onAnySpeechEvent();
     let final = '';
-    for (const r of ev.results){
-      if (r.isFinal) final += (r[0].transcript + ' ');
-    }
+    for (const r of ev.results){ if (r.isFinal) final += (r[0].transcript + ' '); }
     if (final) onFinalTranscript(final);
   }
 
@@ -211,36 +256,44 @@
   }
 
   function startRecognition(){
-    if (!SR) return;
+    if (!SR) { showHint(); return; }
     try{
       recog = new SR();
       recog.lang = LANG;
       recog.continuous = true;
       recog.interimResults = true;
-      recog.onstart = () => setListening(true);
-      recog.onend   = () => { setListening(false); if (!speaking) setTimeout(tryStart, 300); };
-      recog.onerror = () => { setListening(false); if (!speaking) setTimeout(tryStart, 600); };
-      recog.onresult= handleResults;
+      recog.onstart  = () => setListening(true);
+      recog.onend    = () => { setListening(false); if (!speaking) setTimeout(tryStart, 350); };
+      recog.onerror  = () => { setListening(false); if (!speaking) setTimeout(tryStart, 600); };
+      recog.onresult = handleResults;
       recog.start();
-    }catch(e){ /* needs a first user gesture in some browsers */ }
+    }catch(e){ showHint(); }
   }
 
   function tryStart(){
-    if (speaking) return;     // don’t listen while TTS is speaking
+    if (speaking) return;                // don’t listen while TTS is speaking
     startRecognition();
   }
 
-  // Auto-start; one tap anywhere provides the required user gesture if blocked
+  // First load: browsers may block mic/audio until the first user gesture.
   document.addEventListener('DOMContentLoaded', () => {
+    // try to start immediately
     tryStart();
-    // Retry on any single tap; also resume AudioContext for beep if suspended
-    document.addEventListener('pointerdown', async () => {
-      if (audioCtx && audioCtx.state === 'suspended') { try{ await audioCtx.resume(); }catch{} }
-      tryStart();
-    }, { passive:true, once:true });
+    // show hint until user taps once
+    showHint();
 
-    // If TTS starts, avoid feedback: stop the recognizer; it resumes on TTS end
-    window.addEventListener('speechSynthesisUtteranceStart', stopRecognition);
+    const oneTimeActivate = async () => {
+      userActivated = true;
+      hideHint();
+      await ensureAudio();               // unlock beep
+      tryStart();                        // (re)start recognition
+      // remove this listener after first use
+      document.removeEventListener('pointerdown', oneTimeActivate, {capture:true});
+    };
+    document.addEventListener('pointerdown', oneTimeActivate, { passive:true, capture:true, once:true });
+
+    // When TTS starts, stop recognizer to avoid feedback; recognizer restarts on TTS end.
+    // (There’s no standard event for start, so we stop right before speaking, above.)
   });
 })();
 </script>
