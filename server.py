@@ -6,8 +6,6 @@ from pydantic import BaseModel
 from fastapi.responses import FileResponse          # NEW ⚠️
 from fastapi.staticfiles import StaticFiles         # NEW ⚠️
 
-# ... keep your NVIDIA_API_KEY / NIM_* code as-is ...
-
 app = FastAPI(title="NVIDIA NIM Voice Gateway")
 app.add_middleware(
     CORSMiddleware,
@@ -17,8 +15,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# (optional) expose /public/ so assets load if you add any
-app.mount("/public", StaticFiles(directory="public"), name="public")   # NEW (safe)
+app.mount("/public", StaticFiles(directory="public"), name="public")
 
 class ChatIn(BaseModel):
     text: str
@@ -26,7 +23,6 @@ class ChatIn(BaseModel):
 class ChatOut(BaseModel):
     reply: str
 
-# ✅ Render the Web Client if public/index.html exists; otherwise show JSON status
 @app.get("/", include_in_schema=False)
 def root():
     index_path = os.path.join(os.path.dirname(__file__), "public", "index.html")
