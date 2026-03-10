@@ -3,16 +3,10 @@ import requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from fastapi.responses import FileResponse          # NEW ⚠️
+from fastapi.staticfiles import StaticFiles         # NEW ⚠️
 
-# Read environment variables
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY") or os.getenv("NIM_API_KEY") or ""
-NIM_BASE_URL   = os.getenv("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
-NIM_LLM_MODEL  = os.getenv("NIM_LLM_MODEL", "meta/llama-3.1-8b-instruct")
-
-if not NVIDIA_API_KEY:
-    raise RuntimeError("Missing NVIDIA_API_KEY env var. Get it from build.nvidia.com -> API Keys.")
-
-CHAT_URL = NIM_BASE_URL.rstrip("/") + "/chat/completions"
+# ... keep your NVIDIA_API_KEY / NIM_* code as-is ...
 
 app = FastAPI(title="NVIDIA NIM Voice Gateway")
 app.add_middleware(
@@ -23,14 +17,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# (optional) expose /public/ so assets load if you add any
+app.mount("/public", StaticFiles(directory="public"), name="public")   # NEW (safe)
+
 class ChatIn(BaseModel):
     text: str
 
 class ChatOut(BaseModel):
     reply: str
 
-@app.get("/")
+# ✅ Render the Web Client if public/index.html exists; otherwise show JSON status
+@app.get("/", include_in_schema=False)
 def root():
+    index_path = os.path.join(os.path.dirname(__file__), "public", "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path, media_type="text/html")
     return {"service": "nim-gateway", "status": "ok", "model": NIM_LLM_MODEL}
 
 @app.post("/chat", response_model=ChatOut)
@@ -39,9 +40,6 @@ def chat(body: ChatIn):
     if not text:
         return {"reply": ""}
 
-    # NOTE:
-    # - payload is a dict {...}
-    # - messages is a list [...]
     payload = {
         "model": NIM_LLM_MODEL,
         "messages": [
@@ -51,7 +49,6 @@ def chat(body: ChatIn):
         "temperature": 0.6,
         "max_tokens": 300
     }
-
     headers = {
         "Authorization": f"Bearer {NVIDIA_API_KEY}",
         "Content-Type": "application/json"
@@ -61,15 +58,9 @@ def chat(body: ChatIn):
     resp.raise_for_status()
     data = resp.json()
 
-    # OpenAI-compatible shape: choices[0].message.content
-    reply = ""
     try:
         reply = data["choices"][0]["message"]["content"]
     except Exception:
         reply = str(data)
 
     return {"reply": reply}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
