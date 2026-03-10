@@ -1,22 +1,18 @@
 import os
-import requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from dotenv import load_dotenv
-
-load_dotenv()
 
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY") or os.getenv("NIM_API_KEY") or ""
 NIM_BASE_URL   = os.getenv("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 NIM_LLM_MODEL  = os.getenv("NIM_LLM_MODEL", "meta/llama-3.1-8b-instruct")
 
 if not NVIDIA_API_KEY:
-    raise RuntimeError("Missing NVIDIA_API_KEY env var. Get it from build.nvidia.com → API Keys.")
+    raise RuntimeError("Missing NVIDIA_API_KEY env var. Get it from build.nvidia.com -> API Keys.")
 
-CHAT_URL = f"{NIM_BASE_URL.rstrip('/')}/chat/completions"  # OpenAI‑compatible chat endpoint
+CHAT_URL = NIM_BASE_URL.rstrip("/") + "/chat/completions"
 
-app = FastAPI(title="NVIDIA NIM Voice Gateway (Chat endpoint)")
+app = FastAPI(title="NVIDIA NIM Voice Gateway")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -37,32 +33,11 @@ def root():
 
 @app.post("/chat", response_model=ChatOut)
 def chat(body: ChatIn):
-    prompt = (body.text or "").strip()
-    if not prompt:
+    text = (body.text or "").strip()
+    if not text:
         return {"reply": ""}
 
     payload = {
         "model": NIM_LLM_MODEL,
         "messages": [
             {"role": "system", "content": "You are a concise, helpful assistant."},
-            {"role": "user",   "content": prompt},
-        ],
-        "temperature": 0.6,
-        "max_tokens": 300,
-    }
-    headers = {
-        "Authorization": f"Bearer {NVIDIA_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    r = requests.post(CHAT_URL, json=payload, headers=headers, timeout=60)
-    r.raise_for_status()
-    data = r.json()
-
-    # OpenAI-compatible shape: choices[0].message.content
-    reply = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-    return {"reply": reply}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
