@@ -37,7 +37,7 @@ def chat(body: ChatIn):
     if not text:
         return {"reply": ""}
 
-    payload = {
+    payload = 
         "model": NIM_LLM_MODEL,
         "messages": 
             {"role": "system", "content": "You are a concise, helpful assistant."},
