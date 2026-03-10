@@ -39,5 +39,29 @@ def chat(body: ChatIn):
 
     payload = {
         "model": NIM_LLM_MODEL,
-        "messages": [
+        "messages": 
             {"role": "system", "content": "You are a concise, helpful assistant."},
+            {"role": "user",   "content": text},
+        ],
+        "temperature": 0.6,
+        "max_tokens": 300,
+    }
+    headers = {
+        "Authorization": f"Bearer {NVIDIA_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    resp = requests.post(CHAT_URL, json=payload, headers=headers, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+    reply = ""
+    try:
+        reply = data["choices"][0]["message"]["content"]
+    except Exception:
+        reply = str(data)
+
+    return {"reply": reply}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
