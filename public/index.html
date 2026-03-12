@@ -6,8 +6,8 @@
   <title>AI Voice</title>
   <style>
     :root { --bg:#0b1220; --ring:#60a5fa; --speak:#22c55e; --muted:#90a4b8; }
-    html,body { height:100%; margin:0; background:var(--bg); color:#e5e7eb; }
-    .stage { height:100%; display:flex; align-items:center; justify-content:center; }
+    html,body { height:100%; margin:0; background:var(--bg); color:#e5e7eb; font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif; }
+    .stage { height:100%; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:20px; padding:16px; }
 
     /* Avatar */
     .avatar {
@@ -28,7 +28,7 @@
     @keyframes ringActive { 0%{box-shadow:0 0 0 6px rgba(96,165,250,.65);} 100%{box-shadow:0 0 0 14px rgba(96,165,250,0.10);} }
     @keyframes speakPulse { 0%,100%{box-shadow:0 0 0 4px rgba(34,197,94,.45);} 50%{box-shadow:0 0 0 10px rgba(34,197,94,.15);} }
 
-    /* Cartoon “smart” avatar (glasses + tie) */
+    /* Cartoon avatar */
     svg { width:100%; height:100%; display:block; }
     .head  { fill:#14223a; stroke:#1f2f50; stroke-width:2; }
     .face  { fill:#0f1a2b; }
@@ -57,12 +57,21 @@
     .dot:nth-child(2){ animation-delay:120ms; } .dot:nth-child(3){ animation-delay:240ms; }
     @keyframes bounce { 0%,100%{ transform:translateY(0); opacity:.5; } 50%{ transform:translateY(-8px); opacity:1; } }
 
+    .controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; justify-content:center; }
+    button {
+      background:#1f2f50; color:#e5e7eb; border:1px solid #2a3a59; border-radius:10px; padding:10px 14px;
+      font-weight:600; cursor:pointer;
+    }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    .hint { color:var(--muted); font-size:.92rem; text-align:center; max-width:600px; }
+    .warn { color:#fbbf24; }
+
     .sr-only { position:absolute; clip:rect(0 0 0 0); clip-path:inset(50%); width:1px; height:1px; overflow:hidden; white-space:nowrap; border:0; }
   </style>
 </head>
 <body>
   <main class="stage" aria-label="Voice assistant">
-    <div id="avatar" class="avatar blink idle listening" aria-live="polite">
+    <div id="avatar" class="avatar blink idle" aria-live="polite">
       <div class="ring"></div>
       <svg viewBox="0 0 200 220" role="img" aria-hidden="true">
         <defs>
@@ -86,6 +95,15 @@
       </svg>
       <div class="loader" aria-hidden="true"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>
     </div>
+
+    <div class="controls">
+      <button id="startBtn">Tap to start</button>
+      <button id="stopBtn" disabled>Stop</button>
+    </div>
+    <p class="hint" id="hint">Say <b>Hello</b> to ask a question. After the beep, speak normally and pause.</p>
+    <p id="iosWarn" class="hint warn" style="display:none;">
+      Your browser doesn’t support on‑device speech recognition. Try Chrome on Android or use a desktop browser.
+    </p>
     <p id="live" class="sr-only"></p>
   </main>
 
@@ -94,16 +112,30 @@
   /* ===== Config ===== */
   const CHAT_URL    = location.origin.replace(/\/$/,'') + '/chat';
   const LANG        = 'en-US';
-  const WAKE_WORD   = 'hello';      // require “Hello” for EVERY question
+  const WAKE_WORD   = 'hello';        // require “Hello” for EVERY question
   const BEEP_FREQ   = 880, BEEP_MS = 140;
-  const PAUSE_MS    = 1200;         // quick pause → finalize
-  const MAX_WAIT_MS = 5000;         // safety cap
+  const PAUSE_MS    = 1500;           // a bit longer: avoid premature finalize on mobile
+  const MAX_WAIT_MS = 7000;           // absolute cap
   const TTS_VOL     = 1.0, TTS_RATE = 0.98, TTS_PITCH = 1.02;
-  const WAKE_COOLDOWN_MS = 2000;    // de-bounce: prevent multi-beeps
+  const WAKE_COOLDOWN_MS = 3000;      // longer cooldown
 
   /* ===== DOM ===== */
-  const avatar = document.getElementById('avatar');
-  const live   = document.getElementById('live');
+  const avatar  = document.getElementById('avatar');
+  const live    = document.getElementById('live');
+  const startBtn= document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const iosWarn = document.getElementById('iosWarn');
+
+  /* ===== Environment checks ===== */
+  const SR      = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+  const hasTTS  = 'speechSynthesis' in window;
+  const isIOS   = /iP(ad|hone|od)/i.test(navigator.platform) || (navigator.userAgent.includes('Mac') && 'ontouchend' in document);
+  const isiOSWebKit = isIOS && /AppleWebKit/i.test(navigator.userAgent);
+
+  // iOS Safari does NOT support SR (webkitSpeechRecognition is not available in mobile Safari)
+  if (!SR && isiOSWebKit) {
+    iosWarn.style.display = 'block';
+  }
 
   /* ===== Beep (WebAudio + fallback) ===== */
   let audioCtx = null;
@@ -128,13 +160,15 @@
     }
   }
 
-  /* ===== SR + TTS ===== */
-  const SR     = window.SpeechRecognition || window.webkitSpeechRecognition;
-  const hasTTS = 'speechSynthesis' in window;
+  /* ===== State ===== */
+  let recog=null, listening=false, speaking=false;
+  // States: 'idle' (await wake), 'armed' (collecting), 'speaking' (TTS)
+  let state='idle';
 
-  let recog=null, speaking=false, listening=false;
-  let state='idle';               // 'idle' | 'armed' | 'speaking'
+  // Buffers & timing
   let buffer='', idleTimer=null, hardTimer=null, lastWakeTs=0;
+  // Session lock to prevent re-beep until a question completes
+  let wakeLocked=false;
 
   /* ---------- UI state helpers ---------- */
   function setClass(cls) {
@@ -145,22 +179,35 @@
   function uiToArmed(){ setClass('asking'); }
   function uiToSpeaking(){ setClass('speaking'); }
 
-  /* ---------- SR control ---------- */
-  function stopRecognition(){ try{ recog && recog.stop(); }catch{} listening=false; }
+  /* ---------- Recognition control ---------- */
+  function stopRecognition(){
+    try{ recog && recog.stop(); }catch{}
+    listening=false;
+  }
   function startRecognition(){
     if (!SR || state==='speaking') return;
     try{
       recog = new SR();
       recog.lang = LANG; recog.continuous = true; recog.interimResults = true;
+      // Some mobile engines perform better without too many alternatives
+      recog.maxAlternatives = 1;
 
       recog.onstart  = () => { listening=true; if(state==='idle'){ uiToIdle(); } };
-      recog.onend    = () => { listening=false; if (state!=='speaking') setTimeout(tryStart, 900); };
-      recog.onerror  = () => { listening=false; if (state!=='speaking') setTimeout(tryStart, 1400); };
+      recog.onend    = () => {
+        listening=false;
+        // Don’t auto-restart while speaking or if we explicitly stopped.
+        if (state!=='speaking') setTimeout(tryStart, 900);
+      };
+      recog.onerror  = () => {
+        listening=false;
+        if (state!=='speaking') setTimeout(tryStart, 1400);
+      };
 
-      // Reset timers on ANY activity while armed; add final chunks to buffer
+      // Any activity while armed should reset pause timers (interim or final)
       recog.onresult = (ev) => {
         if (state==='armed') resetPauseTimers();
-        let final = '';
+        // Consume finals into buffer
+        let final='';
         for (const r of ev.results){ if (r.isFinal) final += (r[0].transcript + ' '); }
         if (final) onFinal(final);
       };
@@ -180,14 +227,28 @@
       /Samantha|Alex|Karen|Daniel|Tessa|Moira/i
     ];
     for (const p of priority){ const v = list.find(v => p.test(v.name)); if (v) return v; }
-    return list.find(v => /en/i.test(v.lang)) || list[0];
+    return list.find(v => /en/i.test(v.lang)) || list[0] || null;
+  }
+  function warmUpTTS() {
+    if (!hasTTS) return;
+    // Some browsers require an initial no-op speak inside a user gesture to unlock audio
+    try {
+      const u = new SpeechSynthesisUtterance('.');
+      u.volume = 0; u.rate = 1; u.pitch = 1; u.lang = LANG;
+      speechSynthesis.cancel();
+      speechSynthesis.speak(u);
+    }catch{}
   }
   function ensureVoicesReady(cb){
-    if (speechSynthesis.getVoices().length) { cb(); return; }
-    speechSynthesis.onvoiceschanged = () => { cb(); };
+    if (!hasTTS) { cb(); return; }
+    const run = () => { preferredVoice = pickVoice(); cb(); };
+    if (speechSynthesis.getVoices().length) { run(); return; }
+    speechSynthesis.onvoiceschanged = () => { run(); };
+    // Fallback timer if event never fires on some devices
+    setTimeout(run, 1000);
   }
 
-  function speak(text){
+  async function speak(text){
     if (!hasTTS || !text) { state='idle'; uiToIdle(); tryStart(); return; }
 
     const attemptSpeak = (voiceOverride=null) => new Promise(resolve => {
@@ -201,28 +262,30 @@
         u.voice  = voiceOverride || preferredVoice || null;
 
         let started=false;
-        const guard = setTimeout(()=>{ if(!started){ try{ speechSynthesis.cancel(); }catch{} resolve(false); }}, 700);
+        const guard = setTimeout(()=>{ if(!started){ try{ speechSynthesis.cancel(); }catch{} resolve(false); }}, 1200);
 
         u.onstart = () => { started=true; clearTimeout(guard); };
         u.onend   = () => { resolve(true); };
         u.onerror = () => { resolve(false); };
 
+        // Cancel any pending queue then speak
         speechSynthesis.cancel();
         speechSynthesis.speak(u);
-        live.textContent = text; // a11y only
+        live.textContent = text; // a11y
       }catch(e){ resolve(false); }
     });
 
-    (async () => {
-      const voices = speechSynthesis.getVoices();
-      const order = [preferredVoice, voices.find(v=>/en/i.test(v.lang)&&v!==preferredVoice), voices[0]||null].filter(Boolean);
-      let ok=false;
-      for (const v of order){ ok = await attemptSpeak(v); if (ok) break; }
-      if (!ok) ok = await attemptSpeak(null);
+    const voices = hasTTS ? speechSynthesis.getVoices() : [];
+    const order = [preferredVoice, voices.find(v=>/en/i.test(v?.lang) && v!==preferredVoice), voices[0]||null].filter(Boolean);
 
-      // back to idle, always require Hello again
-      state='idle'; uiToIdle(); tryStart();
-    })();
+    // Try multiple times with fallback voices
+    let ok=false;
+    for (const v of order){ ok = await attemptSpeak(v); if (ok) break; }
+    if (!ok) ok = await attemptSpeak(null);
+
+    // End of TTS → unlock next session
+    wakeLocked = false;
+    state='idle'; uiToIdle(); tryStart();
   }
 
   /* ---------- Gateway ---------- */
@@ -237,8 +300,13 @@
       const data  = await res.json().catch(()=>({reply:''}));
       const reply = (data && data.reply) ? data.reply : '';
       if (reply) speak(reply);
-      else { state='idle'; uiToIdle(); tryStart(); }
-    }catch(e){ speak('Sorry, I lost the connection.'); }
+      else { // If no reply, gracefully finish and unlock
+        wakeLocked = false;
+        state='idle'; uiToIdle(); tryStart();
+      }
+    }catch(e){
+      speak('Sorry, I lost the connection.');
+    }
   }
 
   /* ---------- Timing ---------- */
@@ -247,13 +315,13 @@
     if (state!=='armed') return;
     const q = (buffer||'').trim();
     state='idle'; clearTimers(); uiToIdle();
-    if (q) askGateway(q); // speak only if user actually asked
-    // else: do nothing (you asked for that behavior)
+    if (q) askGateway(q);
+    else { wakeLocked = false; tryStart(); }
   }
   function resetPauseTimers(){
     clearTimers();
-    idleTimer = setTimeout(finalize, PAUSE_MS);   // fast end-of-speech
-    hardTimer = setTimeout(finalize, MAX_WAIT_MS);// absolute cap
+    idleTimer = setTimeout(finalize, PAUSE_MS);    // end-of-speech
+    hardTimer = setTimeout(finalize, MAX_WAIT_MS); // absolute cap
   }
 
   /* ---------- Text utils ---------- */
@@ -261,7 +329,6 @@
     return (str||'').toLowerCase().replace(/[^a-z\s]/g,' ').replace(/\s+/g,' ').trim();
   }
   function isHello(str){
-    // strict word-boundary match ("hello", "hello there", "well hello")
     return /\bhello\b/.test(normalized(str));
   }
 
@@ -270,28 +337,55 @@
     const text = finalText.trim();
     if (!text) return;
 
-    // If we are armed, keep collecting until pause timers fire
+    // Collect while armed
     if (state==='armed'){
       buffer += (buffer ? ' ' : '') + text;
       resetPauseTimers();
       return;
     }
 
-    // Wake detection in idle; prevent multi-beeps via cooldown and state gate
+    // Wake detection when idle
     const now = Date.now();
-    if (state==='idle' && isHello(text) && (now - lastWakeTs) >= WAKE_COOLDOWN_MS){
+    if (state==='idle' && !wakeLocked && isHello(text) && (now - lastWakeTs) >= WAKE_COOLDOWN_MS){
       lastWakeTs = now;
-      // Transition to armed ONCE, play single beep, prepare buffer
+      wakeLocked = true;           // lock this Q session: prevents multi-beeps
       state='armed'; buffer=''; uiToArmed();
-      ensureAudio().then(()=>beep()); // one short beep
-      resetPauseTimers();             // if user pauses right after Hello
+      ensureAudio().then(()=>beep());   // single short beep
+      resetPauseTimers();               // in case user pauses right after Hello
     }
   }
 
+  /* ---------- Controls ---------- */
+  async function startAll(){
+    // Must run inside user gesture to unlock audio and TTS on mobile
+    await ensureAudio();
+    warmUpTTS();
+
+    ensureVoicesReady(() => {
+      if (SR){
+        state='idle'; uiToIdle(); tryStart();
+        startBtn.disabled = true; stopBtn.disabled = false;
+      } else {
+        // Without SR, we can still indicate unsupported
+        startBtn.disabled = true; stopBtn.disabled = false;
+      }
+    });
+  }
+  function stopAll(){
+    stopRecognition();
+    try{ speechSynthesis.cancel(); }catch{}
+    clearTimers();
+    state='idle'; wakeLocked = false; buffer='';
+    uiToIdle();
+    startBtn.disabled = false; stopBtn.disabled = true;
+  }
+  startBtn.addEventListener('click', startAll, { passive:true });
+  stopBtn.addEventListener('click',  stopAll,  { passive:true });
+
   /* ---------- Boot ---------- */
   document.addEventListener('DOMContentLoaded', () => {
-    ensureVoicesReady(() => { preferredVoice = pickVoice(); });
-    state='idle'; uiToIdle(); tryStart(); // idle listening; every Q requires "Hello"
+    // Initial UI only; we do NOT auto-start SR/TTS on mobile.
+    setClass('idle');
   });
 })();
 </script>
